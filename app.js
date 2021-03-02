@@ -8,6 +8,9 @@ const session = require('express-session')
 const passport = require('passport')
 const passportLocalMongoose = require('passport-local-mongoose')
 
+//lvl 6
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+const findOrCreate = require("mongoose-findorcreate");
 
 const app = express();
 
@@ -21,7 +24,7 @@ app.use(bodyParser.urlencoded({
 
 //express-session setting it with some initial configuartion
 app.use(session({
-  secret: "Our little secret.",
+  secret: process.env.SECRET,
   resave: false,
   saveUninitialized: false,
 }));
@@ -40,11 +43,18 @@ mongoose.set('useCreateIndex', true);
 
 //Upgrade: creating proper Schema base on mongoose - objec t created from mongoose.schema class
 const userSchema = new mongoose.Schema({
+  //local authentication field
   email: String,
-  password: String
+  password: String,
+  // google authenticate field
+  googleId: String,
+  secret: String
 });
 // this is going to do a lot of heavy lifting - hashing, salting, saving users
 userSchema.plugin(passportLocalMongoose);
+
+// lvl 6
+userSchema.plugin(findOrCreate)
 
 // setting new user model
 const User = new mongoose.model("User", userSchema);
@@ -52,15 +62,67 @@ const User = new mongoose.model("User", userSchema);
 // creating local login strategy
 passport.use(User.createStrategy())
 
+//IT GAVE ME ERROR IN LEVEL 6 - IT NO WORKING WITH GOOGLE STRATEGY ONLY WITH local
 //serialization deserialization of user
-passport.serializeUser(User.serializeUser());
-passport.deserializeUser(User.deserializeUser());
+// passport.serializeUser(User.serializeUser());
+// passport.deserializeUser(User.deserializeUser());
 // !IMPORTANT order of the code from level 5 is very important!
+
+//SERIALIZATION AND DESERIALIZATION WHICH SHOULD WORK WITH ANY TYPE OF serialization
+passport.serializeUser(function(user, done) {
+  done(null, user.id);
+})
+
+passport.deserializeUser(function(id, done) {
+  User.findById(id, function(err, user) {
+    done(err, user)
+  })
+})
+
+
+//passport googleusercontent -> it have to be added after all set-ups right before rounds
+passport.use(new GoogleStrategy({
+    clientID: process.env.CLIENT_ID,
+    clientSecret: process.env.CLIENT_SECRET,
+    callbackURL: "http://localhost:3000/auth/google/secrets",
+    //check if this is working: - line bellow
+    userProfileURL: "https://www.googleapis.com/oauth2/v3/userinfo"
+  },
+  function(accessToken, refreshToken, profile, done) {
+    console.log(profile)
+    // findOrCreate is normally pseudo code, but we can import the "mongoose-findorcreate" to make it work
+    //here it would create user if no exist or find if existing
+    User.findOrCreate({
+      googleId: profile.id
+    }, function(err, user) {
+      return done(err, user);
+    });
+  }
+));
+
 
 //EJS rendering on the get routes
 app.get("/", function(req, res) {
   res.render("home")
 })
+
+app.get("/auth/google",
+  passport.authenticate("google", {
+    //we will tell to google what we want by scope
+    scope: ['profile']
+  })
+)
+//app.get -> comming from the google authentication!
+app.get('/auth/google/secrets',
+  passport.authenticate('google', {
+    failureRedirect: '/login'
+  }),
+  function(req, res) {
+    //successul authentication, redirect to the secret page
+    res.redirect('/secrets');
+  });
+
+
 app.get("/login", function(req, res) {
   res.render("login")
 })
@@ -70,11 +132,49 @@ app.get("/register", function(req, res) {
 
 //this route will be resposible to check if the user is authenitcated by the cookie! all modules from lvl 5 needed
 app.get("/secrets", function(req, res) {
+  //{$ne:null}
+  User.find({
+    "secret": {
+      $exists: true
+    }
+  }, function(err, foundUsers) {
+    if (err) {
+      console.log(err)
+    } else {
+      if (foundUsers) {
+        res.render("secrets", {
+          usersWithSecrets: foundUsers
+        })
+      }
+    }
+  })
+})
+
+app.get("/submit", function(req, res) {
   if (req.isAuthenticated) {
-    res.render("secrets")
+    res.render("submit")
   } else {
     res.redirect("/login")
   }
+})
+
+app.post("/submit", function(req, res) {
+  const submittedSecret = req.body.secret;
+
+  console.log(req.user._id)
+
+  User.findById(req.user._id, function(err, foundUser) {
+    if (err) {
+      console.log(err)
+    } else {
+      if (foundUser) {
+        foundUser.secret = submittedSecret;
+        foundUser.save(function() {
+          res.redirect("/secrets")
+        })
+      }
+    }
+  })
 })
 
 app.get("/logout", function(req, res) {
